@@ -1,4 +1,5 @@
 import os
+import time
 import httpx
 from fastapi import FastAPI, Request, BackgroundTasks
 from openai import OpenAI
@@ -7,6 +8,66 @@ app = FastAPI()
 
 # OpenAI API Key 설정 (서버 환경 변수에서 가져옴)
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY_HERE"))
+
+# =========================================================
+# 대화 기록(세션) 저장소 — "꼬리물기 상담"을 위해 필요해요.
+# 카카오 user.id 별로 최근 대화를 기억해뒀다가, 다음 질문에 이어 붙여서
+# OpenAI에 보내줘요. 이게 없으면 매 질문을 "완전 처음 온 손님"처럼 취급해서
+# 앞서 물어본 내용(연체 여부, 인증수단 등)을 다 잊어버려요.
+#
+# ⚠️ 주의: 지금은 서버 메모리에만 저장하는 간단한 방식이에요. Render 서버가
+# 재시작되면(배포·잠들었다 깨어남 등) 대화 기록이 초기화돼요. 나중에 트래픽이
+# 늘어나면 Redis 같은 외부 저장소로 옮기는 게 좋아요. 지금 규모에서는 충분해요.
+# =========================================================
+conversation_store = {}  # { user_id: {"messages": [...], "updated": timestamp} }
+CONVERSATION_TTL_SECONDS = 60 * 30  # 30분 넘게 조용하면 새 상담으로 취급(기록 초기화)
+MAX_HISTORY_TURNS = 8  # 최근 8턴(질문+답변)까지만 기억 — 토큰 사용량 절약
+
+
+def get_history(user_id: str) -> list:
+    entry = conversation_store.get(user_id)
+    if not entry:
+        return []
+    if time.time() - entry["updated"] > CONVERSATION_TTL_SECONDS:
+        del conversation_store[user_id]
+        return []
+    return entry["messages"]
+
+
+def save_history(user_id: str, messages: list):
+    trimmed = messages[-(MAX_HISTORY_TURNS * 2):]
+    conversation_store[user_id] = {"messages": trimmed, "updated": time.time()}
+
+
+def is_image_url(text: str) -> bool:
+    """카카오는 사용자가 사진을 보내면 utterance 필드에 이미지 CDN 주소를 담아서 보내줘요.
+    (일반 텍스트가 아니라 사진 URL이 들어있으면 사진으로 판단)"""
+    if not text:
+        return False
+    t = text.strip().lower()
+    return t.startswith("http") and ("kakaocdn" in t or any(
+        t.split("?")[0].endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]
+    ))
+
+
+def build_user_content(user_message: str):
+    """텍스트면 그대로, 사진(유심 사진 등)이면 OpenAI 비전 입력 형식으로 변환"""
+    if is_image_url(user_message):
+        return [
+            {
+                "type": "text",
+                "text": (
+                    "고객이 유심(USIM) 사진을 보냈어요. 사진을 보고 [3] 유심구입 가이드의 "
+                    "K망(바로유심)·L망(모두의 유심 원칩) 특징(색상·디자인·로고)과 비교해서 "
+                    "어떤 통신망 유심인지 최대한 식별해줘. 다만 사진만으로는 실제 개통 가능 "
+                    "여부(단말기 호환, 미납 이력 등)까지는 100% 확신할 수 없으니, 식별 결과를 "
+                    "안내한 뒤 '정확한 개통 가능 여부는 통신망 선택과 함께 진행해보시면 바로 "
+                    "확인돼요'처럼 자연스럽게 안내해."
+                ),
+            },
+            {"type": "image_url", "image_url": {"url": user_message}},
+        ]
+    return user_message
 
 # =========================================================
 # [축약판] 즉시응답(5초 제한)용 프롬프트
@@ -58,6 +119,22 @@ SYSTEM_PROMPT_SHORT = """
   (그래도 안되면 상담연결)
 - 개통했는데 안터짐: 재부팅, 충전여부 확인, 비행기모드 껐다켜기, 번호이동 직후면
   통신망 등록에 시간 걸릴 수 있음. (그래도 안되면 상담연결)
+
+[개통 문의 상담 플로우 — 진짜 상담원처럼 대화할 것]
+고객이 "개통하고싶어요/선불폰알아보고있어요" 등 개통 의사를 밝히면, 정보를 한번에
+쏟아붓지 말고 아래 순서로 "한 번에 한 가지씩" 자연스럽게 되물어봐(진짜 상담원처럼):
+1. "혹시 통신 요금 연체나 미납 중이신 게 있으실까요? 있으시면 어느 통신사인지도
+   같이 알려주시면 좋아요" (KT자체 미납이면 K망 제한, L망 권유 근거로 사용)
+2. "매장 방문해서 진행하실지, 비대면(온라인)으로 편하게 진행하실지 어느 쪽이
+   편하실까요?"
+3. (비대면 선택시) "비대면으로 진행하시려면 안면인증이나 카카오·토스·PASS·국민·
+   신한·페이코·삼성패스 같은 간편인증서 중 하나가 필요한데, 혹시 사용 가능하신
+   게 있으실까요?" (안면인증도 신분증만 있으면 가능하다고 안내 가능)
+4. 답변들을 종합해서 맞춤 추천을 해줘(예: K망/L망 중 무엇, 온라인/매장 중 무엇,
+   다음 단계 링크). 이미 대화에서 답변한 내용은 다시 묻지 말고 기억해서 이어갈 것.
+5. (사진으로 유심을 보내며 "이 유심 개통되나요?" 물어보면) 사진 속 유심 디자인을
+   보고 K망(바로유심)인지 L망(모두의 유심 원칩)인지 식별해서 안내하고, 정확한
+   개통 가능 여부는 통신망 선택 후 진행하면 바로 확인된다고 안내.
 
 [답변 스타일] 카톡 채팅창에 맞게 2~3문장 단위로 짧게 끊어 쓰고, 존댓말(~해요체) 유지,
 이모지는 최소한만 사용. 모르는 내용은 절대 지어내지 말 것.
@@ -483,6 +560,48 @@ A. 네, 요금제 선택부터 본인 인증, 안면 인식, 유심 장착까지
 5. 그래도 안 되면 → 상담 연결 안내 (개통 처리 오류 가능성)
 
 =========================================================
+[15] 개통 문의 상담 플로우 (매우 중요 — 진짜 상담원처럼 대화할 것)
+=========================================================
+고객이 "개통하고 싶어요", "선불폰 알아보고 있어요", "요금제 뭐 있나요" 등 개통
+자체에 관심을 보이면, 정보를 한 번에 전부 쏟아내지 말고 진짜 상담원이 상담하듯
+아래 순서로 "한 번에 한 가지 질문씩" 자연스럽게 되물어보면서 대화를 이어가:
+
+1단계. 연체·미납 여부 확인
+"혹시 통신 요금 연체나 미납 중이신 게 있으실까요? 있으시면 어느 통신사인지도
+같이 알려주시면 좋아요" — 답변에 따라 KT 자체 미납이면 K망 제한/L망 권유 판단에 사용.
+
+2단계. 방문개통 vs 비대면개통 희망 확인
+"매장 방문해서 진행하실지, 아니면 비대면(온라인)으로 편하게 진행하실지 어느 쪽이
+편하실까요?" — 방문 원하면 [7] 방문개통 예약 안내로, 비대면 원하면 3단계로.
+
+3단계. (비대면 선택 시) 인증 수단 확인
+"비대면으로 진행하시려면 안면인증이나 카카오·토스·PASS·국민·신한·페이코·삼성패스
+같은 간편인증서 중 하나가 필요한데, 혹시 사용 가능하신 게 있으실까요?" — 안면인증은
+신분증만 있으면 별도 앱 없이도 가능하다고 안내 가능. 둘 다 없다고 하면 방문개통으로
+자연스럽게 안내 전환.
+
+4단계. 종합 안내
+위 답변들을 종합해서 맞춤 추천을 제시: 어떤 통신망(K/L)이 적합한지, 온라인/매장 중
+어떤 경로가 맞는지, 다음 단계(유심구매 링크, 개통사이트, 방문예약 링크 등)를 안내.
+
+■ 대화 진행 원칙
+- 이미 대화에서 답변받은 내용(연체 여부, 희망 방식, 인증수단 등)은 절대 다시 묻지
+  말고 기억해서 이어갈 것. 대화 기록이 함께 전달되니 이를 참고해서 문맥을 이어가.
+- 고객이 질문 순서를 벗어나 먼저 다른 걸 물어보면(예: 바로 "요금제 얼마예요") 그
+  질문에 먼저 답한 뒤, 자연스럽게 나머지 확인 질문으로 돌아올 것("참고로 혹시
+  연체나 미납은 없으실까요?" 식으로).
+
+■ 유심 사진으로 개통 가능 여부를 물어볼 때
+고객이 유심 사진을 보내며 "이 유심 개통되나요?"라고 물으면:
+1. 사진 속 유심의 색상·디자인·로고를 [3] 유심구입 가이드의 K망(바로유심)/L망(모두의
+   유심 원칩) 특징과 비교해서 어떤 통신망 유심인지 최대한 식별해 안내.
+2. 식별이 애매하면 "정확히는 유심 뒷면 일련번호로 확인되니, 개통 사이트에서
+   통신망을 선택하시면 바로 확인돼요"처럼 안내.
+3. 사진만으로는 실제 개통 가능 여부(연체·정지 이력 등 계정 상태)까지는 알 수
+   없으니, 유심 종류 식별과 개통 가능 여부(계정 상태)는 별개라는 점을 자연스럽게
+   구분해서 안내할 것. 근거 없이 "개통 가능해요/안돼요"로 단정하지 말 것.
+
+=========================================================
 [답변 불가 시 대응 원칙] — 반드시 지킬 것 (상담원 연결은 "최후의 수단"으로만 사용)
 =========================================================
 ■ 기본 원칙: 절대로 첫 질문에 바로 상담원 연결부터 안내하지 마. 위 [14] 자가해결
@@ -519,17 +638,20 @@ A. 네, 요금제 선택부터 본인 인증, 안면 인식, 유심 장착까지
 """
 
 
-def get_ai_answer(user_message: str, system_prompt: str) -> str:
+def get_ai_answer(user_message: str, system_prompt: str, history: list = None) -> str:
     """OpenAI를 호출해서 답변 텍스트만 돌려주는 함수 (즉시응답/콜백 양쪽에서 공용으로 사용)
     system_prompt: 즉시응답 경로에서는 SYSTEM_PROMPT_SHORT, 콜백 경로에서는
-    SYSTEM_PROMPT_FULL을 넘겨받아요."""
+    SYSTEM_PROMPT_FULL을 넘겨받아요.
+    history: 이전 대화 기록(꼬리물기 상담용). 없으면 새 대화로 취급."""
+    history = history or []
+    user_content = build_user_content(user_message)
+    messages = [{"role": "system", "content": system_prompt}] + history + [
+        {"role": "user", "content": user_content}
+    ]
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message}
-            ],
+            messages=messages,
             temperature=0.3,
             max_tokens=600,  # 답변이 너무 길어져서 응답이 느려지는 걸 방지 (약 카톡 메시지 5~8개 분량)
         )
@@ -554,11 +676,23 @@ def build_simple_text_response(text: str) -> dict:
     }
 
 
-async def process_and_send_callback(user_message: str, callback_url: str):
+def record_turn(user_id: str, history: list, user_message: str, ai_answer: str):
+    """이번 turn(질문+답변)을 대화기록에 저장. 사진 URL은 기록에 그대로 남기지
+    않고 짧은 표시로 대체해서 기록을 가볍게 유지함."""
+    stored_user_message = "[유심/사진 이미지 전송]" if is_image_url(user_message) else user_message
+    new_history = history + [
+        {"role": "user", "content": stored_user_message},
+        {"role": "assistant", "content": ai_answer},
+    ]
+    save_history(user_id, new_history)
+
+
+async def process_and_send_callback(user_message: str, callback_url: str, user_id: str, history: list):
     """(콜백 승인 후에만 사용됨) 백그라운드에서 OpenAI 호출 후, 완성된 답변을
     콜백 URL로 다시 전송하는 함수. 콜백 URL은 발급 후 1분간만 유효하고 1회만 쓸 수 있음.
     콜백 경로는 시간 여유가 있어서(최대 1분) 상세판 프롬프트를 사용해요."""
-    ai_answer = get_ai_answer(user_message, SYSTEM_PROMPT_FULL)
+    ai_answer = get_ai_answer(user_message, SYSTEM_PROMPT_FULL, history)
+    record_turn(user_id, history, user_message, ai_answer)
     payload = build_simple_text_response(ai_answer)
     try:
         async with httpx.AsyncClient(timeout=30) as http_client:
@@ -573,6 +707,9 @@ async def kakao_chat(request: Request, background_tasks: BackgroundTasks):
     user_request = body.get("userRequest", {})
     user_message = user_request.get("utterance", "") or "안녕하세요"
     callback_url = user_request.get("callbackUrl")
+    user_id = user_request.get("user", {}).get("id", "unknown")
+
+    history = get_history(user_id)
 
     # ---------------------------------------------------------------
     # 콜백(Callback) 기능이 카카오에서 승인되어 활성화된 경우에만
@@ -582,14 +719,15 @@ async def kakao_chat(request: Request, background_tasks: BackgroundTasks):
     # (승인은 챗봇관리자센터 > 설정 > AI 챗봇 관리에서 신청)
     # ---------------------------------------------------------------
     if callback_url:
-        background_tasks.add_task(process_and_send_callback, user_message, callback_url)
+        background_tasks.add_task(process_and_send_callback, user_message, callback_url, user_id, history)
         return {
             "version": "2.0",
             "useCallback": True
         }
 
     # ---- 콜백 미사용(기본) — 5초 안에 즉시 응답, 속도를 위해 축약 프롬프트 사용 ----
-    ai_answer = get_ai_answer(user_message, SYSTEM_PROMPT_SHORT)
+    ai_answer = get_ai_answer(user_message, SYSTEM_PROMPT_SHORT, history)
+    record_turn(user_id, history, user_message, ai_answer)
     return build_simple_text_response(ai_answer)
 
 
