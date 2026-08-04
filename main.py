@@ -4,10 +4,9 @@ from openai import OpenAI
 
 app = FastAPI()
 
-# OpenAI API Key 설정 (서버 환경 변수에서 가져옴)
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY_HERE"))
+# OpenAI 클라이언트 초기화
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
 
-# 오늘통신 선불폰 개통 전용 AI 상담원 프롬프트
 SYSTEM_PROMPT = """
 너는 선불폰 개통 전문 브랜드 '오늘통신'의 친절하고 스마트한 24시간 AI 상담원이야.
 아래 오늘통신의 핵심 안내 규정과 지식을 바탕으로 고객의 질문에 명확하고 친절하게 답변해줘.
@@ -37,17 +36,19 @@ SYSTEM_PROMPT = """
 - 친절하고 전문적인 어조 유지.
 """
 
+@app.get("/")
+async def root():
+    return {"message": "Today Telecom Chatbot Server is Running!"}
+
 @app.post("/kakao-chat")
 async def kakao_chat(request: Request):
     try:
         body = await request.json()
-        # 고객이 카카오톡 채널에 입력한 메시지 추출
         user_message = body.get("userRequest", {}).get("utterance", "")
         
         if not user_message:
             user_message = "안녕하세요"
 
-        # OpenAI ChatGPT API 호출 (gpt-4o-mini 가성비 모델 사용)
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -60,9 +61,8 @@ async def kakao_chat(request: Request):
         ai_answer = response.choices[0].message.content
 
     except Exception as e:
-        ai_answer = f"죄송합니다. 서비스 처리 중 오류가 발생했습니다: {str(e)}"
+        ai_answer = f"죄송합니다. 처리 중 오류가 발생했습니다: {str(e)}"
 
-    # 카카오톡 오픈빌더 규격에 맞춘 JSON 응답 구조
     return {
         "version": "2.0",
         "template": {
@@ -75,26 +75,3 @@ async def kakao_chat(request: Request):
             ]
         }
     }
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-```[cite: 2]
-
-3. 메모장 상단 **[파일] ➔ [다른 이름으로 저장]**을 누릅니다.
-   * **파일 이름**: `main.py`
-   * **파일 형식**: `모든 파일 (*.*)`로 변경 **(★매우 중요)**
-4. **[저장]**을 누릅니다.
-
----
-
-## ✅ 점검하기
-
-여기까지 완료하셨다면, `today_chatbot` 폴더 안에 **딱 2개의 파일**이 존재하게 됩니다.
-
-* `requirements.txt`[cite: 1]
-* `main.py`[cite: 2]
-
-이 두 개의 파일이 준비되셨다면 **"2단계 준비"는 완벽하게 끝난 것입니다!**
-
-다음으로 이 파일들을 인터넷 상에 올리기 위한 **'3단계: GitHub에 코드 올려서 Render.com 서버 연결하기'** 단계로 진행할까요?
