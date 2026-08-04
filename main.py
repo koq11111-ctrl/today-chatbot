@@ -1,5 +1,6 @@
 import os
-from fastapi import FastAPI, Request
+import httpx
+from fastapi import FastAPI, Request, BackgroundTasks
 from openai import OpenAI
 
 app = FastAPI()
@@ -400,44 +401,74 @@ A. 네, 요금제 선택부터 본인 인증, 안면 인식, 유심 장착까지
 """
 
 
-@app.post("/kakao-chat")
-async def kakao_chat(request: Request):
+def get_ai_answer(user_message: str) -> str:
+    """OpenAI를 호출해서 답변 텍스트만 돌려주는 함수 (즉시응답/콜백 양쪽에서 공용으로 사용)"""
     try:
-        body = await request.json()
-        # 고객이 카카오톡 채널에 입력한 메시지 추출
-        user_message = body.get("userRequest", {}).get("utterance", "")
-
-        if not user_message:
-            user_message = "안녕하세요"
-
-        # OpenAI ChatGPT API 호출 (gpt-4o-mini 가성비 모델 사용)
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_message}
             ],
-            temperature=0.3
+            temperature=0.3,
+            max_tokens=600,  # 답변이 너무 길어져서 응답이 느려지는 걸 방지 (약 카톡 메시지 5~8개 분량)
         )
-
-        ai_answer = response.choices[0].message.content
-
+        return response.choices[0].message.content
     except Exception as e:
-        ai_answer = f"죄송합니다. 서비스 처리 중 오류가 발생했습니다: {str(e)}"
+        return f"죄송합니다. 서비스 처리 중 오류가 발생했습니다: {str(e)}"
 
-    # 카카오톡 오픈빌더 규격에 맞춘 JSON 응답 구조
+
+def build_simple_text_response(text: str) -> dict:
+    """카카오 오픈빌더 규격에 맞춘 일반 텍스트 응답 JSON"""
     return {
         "version": "2.0",
         "template": {
             "outputs": [
                 {
                     "simpleText": {
-                        "text": ai_answer
+                        "text": text
                     }
                 }
             ]
         }
     }
+
+
+async def process_and_send_callback(user_message: str, callback_url: str):
+    """(콜백 승인 후에만 사용됨) 백그라운드에서 OpenAI 호출 후, 완성된 답변을
+    콜백 URL로 다시 전송하는 함수. 콜백 URL은 발급 후 1분간만 유효하고 1회만 쓸 수 있음."""
+    ai_answer = get_ai_answer(user_message)
+    payload = build_simple_text_response(ai_answer)
+    try:
+        async with httpx.AsyncClient(timeout=30) as http_client:
+            await http_client.post(callback_url, json=payload)
+    except Exception as e:
+        print(f"[콜백 전송 실패] {e}")
+
+
+@app.post("/kakao-chat")
+async def kakao_chat(request: Request, background_tasks: BackgroundTasks):
+    body = await request.json()
+    user_request = body.get("userRequest", {})
+    user_message = user_request.get("utterance", "") or "안녕하세요"
+    callback_url = user_request.get("callbackUrl")
+
+    # ---------------------------------------------------------------
+    # 콜백(Callback) 기능이 카카오에서 승인되어 활성화된 경우에만
+    # callback_url이 내려와요. 승인 전에는 이 값이 없어서 자동으로
+    # 아래 '즉시 응답' 방식으로 동작하니, 승인 후 코드를 따로 안 고쳐도 돼요.
+    # (승인은 챗봇관리자센터 > 설정 > AI 챗봇 관리에서 신청)
+    # ---------------------------------------------------------------
+    if callback_url:
+        background_tasks.add_task(process_and_send_callback, user_message, callback_url)
+        return {
+            "version": "2.0",
+            "useCallback": True
+        }
+
+    # ---- 콜백 미사용(기본) — 5초 안에 즉시 응답 ----
+    ai_answer = get_ai_answer(user_message)
+    return build_simple_text_response(ai_answer)
 
 
 if __name__ == "__main__":
