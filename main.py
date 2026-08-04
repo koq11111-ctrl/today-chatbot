@@ -36,7 +36,6 @@ MAX_HISTORY_TURNS = 8  # 최근 8턴(질문+답변)까지만 기억 — 토큰 �
 escalation_logs = []  # [{"time":.., "user_id":.., "question":.., "answer":..}, ...]
 MAX_ESCALATION_LOGS = 500  # 최대 500건까지만 보관(그 이상은 오래된 것부터 삭제)
 ESCALATION_MARKER = "[ESCALATION]"  # AI가 답변 끝에 이 표시를 붙이면 '상담원 연결' 케이스로 인식
-ADMIN_KEY = os.getenv("ADMIN_KEY", "changeme")  # 로그 페이지 접근용 비밀키(Render 환경변수에서 설정)
 
 
 def check_and_strip_escalation(user_message: str, ai_answer: str, user_id: str) -> str:
@@ -777,14 +776,10 @@ async def kakao_chat(request: Request, background_tasks: BackgroundTasks):
 
 
 @app.get("/escalation-logs")
-async def view_escalation_logs(key: str = ""):
-    """상담원 연결로 넘어간 질문들을 모아보는 관리자용 페이지.
-    브라우저에서 https://[Render주소]/escalation-logs?key=[ADMIN_KEY] 로 접속하면 돼요.
-    ADMIN_KEY는 Render 환경변수에서 직접 설정해주세요(안 정하면 기본값 'changeme' 사용,
-    보안을 위해 꼭 바꿔서 쓰는 걸 추천해요)."""
-    if key != ADMIN_KEY:
-        return {"error": "접근 권한이 없어요. 올바른 key 파라미터가 필요해요."}
-
+async def view_escalation_logs():
+    """상담원 연결로 넘어간 질문들을 모아보는 페이지.
+    브라우저에서 https://[Render주소]/escalation-logs 로 접속하면 바로 보여요.
+    (키 없이 누구나 접속 가능 — 주소를 아는 사람은 다 볼 수 있으니 참고해주세요)"""
     if not escalation_logs:
         return {"count": 0, "message": "아직 상담원 연결로 넘어간 질문이 없어요."}
 
