@@ -103,7 +103,15 @@ L망-이마트24편의점 - LG모두의 원칩
 - 품질: KT, LG U+와 동일한 통신망을 사용하므로 품질 차이 없음.
 """
 
+# UptimeRobot 신호 수신용 (GET, HEAD 요청 지원)
+@app.get("/")
+@app.head("/")
+def read_root():
+    return {"status": "Today Chatbot Server is Running"}
+
+# 카카오톡 챗봇 스킬 호출용
 @app.post("/chat")
+@app.post("/")
 async def chat(request: Request):
     try:
         body = await request.json()
@@ -160,7 +168,3 @@ async def chat(request: Request):
                 ]
             }
         }
-
-@app.get("/")
-def read_root():
-    return {"status": "Today Chatbot Server is Running"}
