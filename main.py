@@ -9,9 +9,46 @@ app = FastAPI()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY_HERE"))
 
 # =========================================================
-# 오늘통신 선불폰 개통 전용 AI 상담원 프롬프트 (상세판)
+# [축약판] 즉시응답(5초 제한)용 프롬프트
+# 카카오 콜백 승인이 나기 전까지는 이 짧은 프롬프트를 사용해요.
+# 프롬프트가 짧을수록 OpenAI 응답 속도가 빨라져서 5초 타임아웃을 피할 수 있어요.
+# 콜백 승인 후에는 아래 SYSTEM_PROMPT_FULL(상세판)이 자동으로 쓰여요.
 # =========================================================
-SYSTEM_PROMPT = """
+SYSTEM_PROMPT_SHORT = """
+너는 '앤텔레콤 선불폰·선불유심 오늘통신'의 24시간 AI 상담원이야. 아래 정보만 근거로
+간결하게 답변해. 모르는 내용은 절대 추측하지 말고 "정확한 확인을 위해 카카오톡
+담당자를 연결해드릴게요, 010-6644-4448로도 문의 가능해요"라고 안내해.
+
+[핵심 정보]
+- 선불폰: 신용조회 없이 개통. 연체·미납·개인회생·신용불량이어도 개통 가능(단, KT
+  자체 미납은 K망 제한 → 이 경우 L망 이용). 약정 없음(위약금 없음), 가입비 없음.
+- 개통 절차 8단계(평균 5분): ①편의점서 유심구매 ②오늘통신.kr서 '셀프개통 시작' ③K망/L망
+  선택 ④간편인증서(카카오·토스·PASS·국민·신한·페이코·삼성패스) 또는 안면인증+신분증
+  ⑤신규/번호이동 선택+유심번호 입력 ⑥요금제·희망번호 선택 ⑦최종확인 ⑧충전 후 사용.
+  신청시간: 신규 08:00~21:50 / 번호이동 10:00~19:50(일요일·공휴일 번호이동 제외).
+- 유심: K망(KT)='바로유심' 8,800원, CU·GS25·이마트24에서 구매. L망(LG U+)='모두의
+  유심원칩' 8,800원, 이마트24에서만 구매. 장착 후 재부팅 2~3회.
+- K망 vs L망: 품질은 K망이 우수. 단 KT 자체 미납이거나 쓰던 폰이 타사 정지·미납
+  상태면 L망 추천(3사 정지단말기 폭넓게 호환). 분실신고(IMEI차단) 단말기는 둘 다 불가.
+- 대표 요금제(월 요금, 상담시 최신가 재확인 안내): 선불LTE기본1 12,100원(300MB) /
+  LTE선불396 39,600원(10.3GB무제한통화문자) / L망5G선불20GB+ 46,400원(20GB) /
+  LTE선불770 77,000원(11GB+일2GB) / LTE비디오 85,900원(100GB). 요금제는 개통후
+  30일뒤 월1회 변경 가능.
+- 방문개통: 온라인이 어려우면 오늘통신.kr/visit/ 에서 매장 예약 가능(전국 79곳,
+  경남김해는 김해BP·김해이레BP). 예약 필수, 준비물은 신분증·예약증·유심비·충전비.
+- 개통후 당일 미충전시 다음날 정지될 수 있음. 충전은 멤버십 앱 또는 무통장입금.
+- 해지: 무약정은 위약금 없음. 14일내 청약철회 가능. 해외로밍은 K망만 가능(L망 불가).
+- 유용 링크: 개통절차 상세=오늘통신.kr/steps/, 유심안내=오늘통신.kr/usim/,
+  방문예약=오늘통신.kr/visit/
+
+[답변 스타일] 카톡 채팅창에 맞게 2~3문장 단위로 짧게 끊어 쓰고, 존댓말(~해요체) 유지,
+이모지는 최소한만 사용. 모르는 내용은 절대 지어내지 말 것.
+"""
+
+# =========================================================
+# [상세판] 콜백 승인 후(최대 1분 응답 허용) 사용할 전체 프롬프트
+# =========================================================
+SYSTEM_PROMPT_FULL = """
 너는 '앤텔레콤 선불폰·선불유심 오늘통신'(이하 '오늘통신')의 24시간 AI 상담원이야.
 반드시 아래 [오늘통신 지식베이스]에 있는 내용만을 근거로 답변해. 지식베이스에 없는 내용은
 절대로 추측하거나 지어내지 말고, 반드시 맨 아래 [답변 불가 시 대응 원칙]을 따라야 해.
@@ -401,13 +438,15 @@ A. 네, 요금제 선택부터 본인 인증, 안면 인식, 유심 장착까지
 """
 
 
-def get_ai_answer(user_message: str) -> str:
-    """OpenAI를 호출해서 답변 텍스트만 돌려주는 함수 (즉시응답/콜백 양쪽에서 공용으로 사용)"""
+def get_ai_answer(user_message: str, system_prompt: str) -> str:
+    """OpenAI를 호출해서 답변 텍스트만 돌려주는 함수 (즉시응답/콜백 양쪽에서 공용으로 사용)
+    system_prompt: 즉시응답 경로에서는 SYSTEM_PROMPT_SHORT, 콜백 경로에서는
+    SYSTEM_PROMPT_FULL을 넘겨받아요."""
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message}
             ],
             temperature=0.3,
@@ -436,8 +475,9 @@ def build_simple_text_response(text: str) -> dict:
 
 async def process_and_send_callback(user_message: str, callback_url: str):
     """(콜백 승인 후에만 사용됨) 백그라운드에서 OpenAI 호출 후, 완성된 답변을
-    콜백 URL로 다시 전송하는 함수. 콜백 URL은 발급 후 1분간만 유효하고 1회만 쓸 수 있음."""
-    ai_answer = get_ai_answer(user_message)
+    콜백 URL로 다시 전송하는 함수. 콜백 URL은 발급 후 1분간만 유효하고 1회만 쓸 수 있음.
+    콜백 경로는 시간 여유가 있어서(최대 1분) 상세판 프롬프트를 사용해요."""
+    ai_answer = get_ai_answer(user_message, SYSTEM_PROMPT_FULL)
     payload = build_simple_text_response(ai_answer)
     try:
         async with httpx.AsyncClient(timeout=30) as http_client:
@@ -456,7 +496,8 @@ async def kakao_chat(request: Request, background_tasks: BackgroundTasks):
     # ---------------------------------------------------------------
     # 콜백(Callback) 기능이 카카오에서 승인되어 활성화된 경우에만
     # callback_url이 내려와요. 승인 전에는 이 값이 없어서 자동으로
-    # 아래 '즉시 응답' 방식으로 동작하니, 승인 후 코드를 따로 안 고쳐도 돼요.
+    # 아래 '즉시 응답' 방식(축약 프롬프트)으로 동작하니, 승인 후 코드를
+    # 따로 안 고쳐도 자동으로 상세 프롬프트 경로로 전환돼요.
     # (승인은 챗봇관리자센터 > 설정 > AI 챗봇 관리에서 신청)
     # ---------------------------------------------------------------
     if callback_url:
@@ -466,8 +507,8 @@ async def kakao_chat(request: Request, background_tasks: BackgroundTasks):
             "useCallback": True
         }
 
-    # ---- 콜백 미사용(기본) — 5초 안에 즉시 응답 ----
-    ai_answer = get_ai_answer(user_message)
+    # ---- 콜백 미사용(기본) — 5초 안에 즉시 응답, 속도를 위해 축약 프롬프트 사용 ----
+    ai_answer = get_ai_answer(user_message, SYSTEM_PROMPT_SHORT)
     return build_simple_text_response(ai_answer)
 
 
