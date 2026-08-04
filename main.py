@@ -78,3 +78,52 @@ SYSTEM_PROMPT = """
 - 국제전화: L망 선불(002 이용), K망 선불(00789 음성 전용 이용).
 - 품질: KT, LG U+와 동일한 통신망을 사용하므로 품질 차이 없음.
 """
+
+@app.post("/chat")
+async def chat(request: Request):
+    try:
+        # 카카오톡 스킬 요청 데이터 수신
+        body = await request.json()
+        user_message = body.get("userRequest", {}).get("utterance", "")
+
+        # OpenAI ChatGPT 답변 생성
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_message}
+            ]
+        )
+        ai_answer = response.choices[0].message.content
+
+        # 카카오톡 챗봇 전용 JSON 응답 규격 생성
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [
+                    {
+                        "simpleText": {
+                            "text": ai_answer
+                        }
+                    }
+                ]
+            }
+        }
+    except Exception as e:
+        # 에러 발생 시 카카오 규격에 맞게 안내 메시지 리턴
+        return {
+            "version": "2.0",
+            "template": {
+                "outputs": [
+                    {
+                        "simpleText": {
+                            "text": "안녕하세요! 앤텔레콤 오늘통신입니다. 😊\n죄송합니다, 잠시 후 다시 시도해 주시거나 카카오톡 채널로 문의해 주세요."
+                        }
+                    }
+                ]
+            }
+        }
+
+@app.get("/")
+def read_root():
+    return {"status": "Today Chatbot Server is Running"}
