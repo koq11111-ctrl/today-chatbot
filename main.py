@@ -1,4 +1,5 @@
 import os
+import time
 from fastapi import FastAPI, Request
 from openai import OpenAI
 
@@ -7,14 +8,17 @@ app = FastAPI()
 # OpenAI 클라이언트 초기화
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
 
+# 사용자별 마지막 대화 시간을 저장하는 메모리 (10분 이내 재질문 시 인사말 생략)
+user_last_interaction = {}
+
 SYSTEM_PROMPT = """
 너는 선불폰 개통 전문 브랜드 '오늘통신'의 친절하고 스마트한 24시간 AI 상담원이야.
 아래 오늘통신의 핵심 안내 규정, 지식, FAQ를 바탕으로 고객의 질문에 명확하고 친절하게 답변해줘.
 
-[인사말 및 기본 응답 규칙]
-1. 첫 인사말: 모든 응답의 시작에는 반드시 "안녕하세요! 앤텔레콤 오늘통신입니다. 😊"로 인사를 시작할 것.
+[기본 응답 규칙]
+1. 인사말은 작성하지 말고, 오직 질문에 대한 본문 설명/답변만 직접적으로 작성할 것. (인사말은 시스템이 자동으로 처리함)
 2. 개통 사이트 안내: 온라인 비대면 셀프개통 주소 안내 시 반드시 "앤플랫폼 오늘통신.com"으로 이동하여 진행하도록 안내할 것.
-3. 친절하고 명확한 톤앤매너(해요체)를 사용하고, 답변은 핵심 위주로 명확하고 간결하게 정리할 것.
+3. 친절하고 명확한 톤앤매너(해요체)를 사용하고, 복잡한 절차나 서류는 순서대로(1, 2, 3...) 보기 쉽게 정리할 것.
 4. AI가 직접 처리할 수 없는 개인정보 조회, 상세 수기 확인, 예외 상담 등은 카카오톡 1:1 상담('앤텔레콤개통문의')으로 친절히 안내할 것.
 
 [오늘통신 개통 핵심 정보]
@@ -84,8 +88,16 @@ async def chat(request: Request):
     try:
         body = await request.json()
         user_message = body.get("userRequest", {}).get("utterance", "")
+        user_id = body.get("userRequest", {}).get("user", {}).get("id", "anonymous")
 
-        # 속도 최적화를 위해 gpt-4o-mini 모델 및 max_tokens 설정
+        current_time = time.time()
+        last_time = user_last_interaction.get(user_id, 0)
+        
+        # 10분(600초) 이내 재질문인지 확인
+        is_follow_up = (current_time - last_time) < 600
+        user_last_interaction[user_id] = current_time
+
+        # OpenAI 답변 생성
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -95,7 +107,13 @@ async def chat(request: Request):
             max_tokens=400,
             temperature=0.5
         )
-        ai_answer = response.choices[0].message.content
+        ai_answer = response.choices[0].message.content.strip()
+
+        # 첫 질문일 때만 인사말을 붙이고, 연속 질문(10분 이내)일 경우 본문만 전달
+        if not is_follow_up:
+            final_text = f"안녕하세요! 앤텔레콤 오늘통신입니다. 😊\n\n{ai_answer}"
+        else:
+            final_text = ai_answer
 
         return {
             "version": "2.0",
@@ -103,7 +121,7 @@ async def chat(request: Request):
                 "outputs": [
                     {
                         "simpleText": {
-                            "text": ai_answer
+                            "text": final_text
                         }
                     }
                 ]
@@ -116,7 +134,7 @@ async def chat(request: Request):
                 "outputs": [
                     {
                         "simpleText": {
-                            "text": "안녕하세요! 앤텔레콤 오늘통신입니다. 😊\n죄송합니다, 답변 생성 시간이 지연되었습니다. 잠시 후 다시 시도해 주세요."
+                            "text": "죄송합니다, 잠시 후 다시 시도해 주시거나 카카오톡 채널로 문의해 주세요."
                         }
                     }
                 ]
