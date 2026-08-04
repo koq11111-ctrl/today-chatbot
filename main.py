@@ -23,6 +23,37 @@ conversation_store = {}  # { user_id: {"messages": [...], "updated": timestamp} 
 CONVERSATION_TTL_SECONDS = 60 * 30  # 30분 넘게 조용하면 새 상담으로 취급(기록 초기화)
 MAX_HISTORY_TURNS = 8  # 최근 8턴(질문+답변)까지만 기억 — 토큰 사용량 절약
 
+# =========================================================
+# 상담원 연결 로그 저장소
+# AI가 "상담원 연결이 필요하다"고 판단할 때마다, 무슨 질문이었는지 여기에
+# 자동으로 기록돼요. /escalation-logs 주소로 접속하면 모아서 볼 수 있어요.
+# (나중에 이 목록을 보면서 "이 질문 자주 나오네" 싶은 걸 골라 프롬프트에
+#  추가해달라고 요청하시면 지식베이스를 계속 보강할 수 있어요)
+#
+# ⚠️ 이것도 서버 메모리에만 저장돼요. 재시작되면 로그가 사라지니, 주기적으로
+# (예: 하루 한 번) /escalation-logs 페이지를 확인하시는 걸 추천드려요.
+# =========================================================
+escalation_logs = []  # [{"time":.., "user_id":.., "question":.., "answer":..}, ...]
+MAX_ESCALATION_LOGS = 500  # 최대 500건까지만 보관(그 이상은 오래된 것부터 삭제)
+ESCALATION_MARKER = "[ESCALATION]"  # AI가 답변 끝에 이 표시를 붙이면 '상담원 연결' 케이스로 인식
+ADMIN_KEY = os.getenv("ADMIN_KEY", "changeme")  # 로그 페이지 접근용 비밀키(Render 환경변수에서 설정)
+
+
+def check_and_strip_escalation(user_message: str, ai_answer: str, user_id: str) -> str:
+    """AI 답변 끝에 [ESCALATION] 마커가 있으면: 로그에 기록하고, 마커는
+    고객에게 안 보이게 잘라내서 돌려줌."""
+    if ai_answer and ESCALATION_MARKER in ai_answer:
+        escalation_logs.append({
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "user_id": user_id,
+            "question": user_message,
+            "answer": ai_answer.replace(ESCALATION_MARKER, "").strip(),
+        })
+        if len(escalation_logs) > MAX_ESCALATION_LOGS:
+            del escalation_logs[0]
+        ai_answer = ai_answer.replace(ESCALATION_MARKER, "").strip()
+    return ai_answer
+
 
 def get_history(user_id: str) -> list:
     entry = conversation_store.get(user_id)
@@ -82,6 +113,10 @@ SYSTEM_PROMPT_SHORT = """
 "그래도 안 돼요"라고 재확인해줄 때만 상담원 연결(카카오톡 담당자 또는
 010-6644-4448)을 안내해. 아래에 없는 사실(정확한 매장주소, 개인 계약상태 등)은
 절대 추측하지 말고 그때만 상담원 연결 안내.
+
+중요: 상담원 연결을 안내할 때는, 답변 맨 마지막 줄에 반드시 정확히 "[ESCALATION]"
+텍스트를 추가해(줄바꿈 후). 이 마커는 나중에 사장님이 자주 나오는 질문을 확인하는
+용도로 쓰이고, 고객에게는 자동으로 안 보이게 처리돼. 일반 답변에는 절대 붙이지 말 것.
 
 [핵심 정보]
 - 선불폰: 신용조회 없이 개통. 연체·미납·개인회생·신용불량이어도 개통 가능(단, KT
@@ -621,6 +656,14 @@ A. 네, 요금제 선택부터 본인 인증, 안면 인식, 유심 장착까지
 카카오톡 채널로 담당자를 연결해드릴게요. 잠시만 기다려주시면 상담원이 직접
 답변드릴게요!" (또는 010-6644-4448로 문의 안내)
 
+■ 매우 중요 — 로그 마커 규칙:
+위 상담원 연결 안내를 하는 경우, 답변의 맨 마지막 줄에 반드시 정확히 아래
+텍스트를 그대로 추가해(줄바꿈 후 추가, 고객에게는 자동으로 안 보이게 처리되니
+걱정하지 말고 꼭 붙일 것):
+[ESCALATION]
+(이 마커는 상담원 연결이 필요했던 질문을 사장님이 나중에 모아보고 지식베이스를
+보강하는 데 쓰여요. 상담원 연결을 안내하지 않는 일반 답변에는 절대 붙이지 말 것.)
+
 ■ 요금·정책은 변경될 수 있으므로, 금액이나 조건을 답할 때는 "상담 시점 기준으로
 다시 한 번 확인해드릴게요" 같은 문구를 자연스럽게 덧붙이는 것을 권장함(단, 매번
 기계적으로 반복하지 말고 필요한 경우에만).
@@ -692,6 +735,7 @@ async def process_and_send_callback(user_message: str, callback_url: str, user_i
     콜백 URL로 다시 전송하는 함수. 콜백 URL은 발급 후 1분간만 유효하고 1회만 쓸 수 있음.
     콜백 경로는 시간 여유가 있어서(최대 1분) 상세판 프롬프트를 사용해요."""
     ai_answer = get_ai_answer(user_message, SYSTEM_PROMPT_FULL, history)
+    ai_answer = check_and_strip_escalation(user_message, ai_answer, user_id)
     record_turn(user_id, history, user_message, ai_answer)
     payload = build_simple_text_response(ai_answer)
     try:
@@ -727,8 +771,29 @@ async def kakao_chat(request: Request, background_tasks: BackgroundTasks):
 
     # ---- 콜백 미사용(기본) — 5초 안에 즉시 응답, 속도를 위해 축약 프롬프트 사용 ----
     ai_answer = get_ai_answer(user_message, SYSTEM_PROMPT_SHORT, history)
+    ai_answer = check_and_strip_escalation(user_message, ai_answer, user_id)
     record_turn(user_id, history, user_message, ai_answer)
     return build_simple_text_response(ai_answer)
+
+
+@app.get("/escalation-logs")
+async def view_escalation_logs(key: str = ""):
+    """상담원 연결로 넘어간 질문들을 모아보는 관리자용 페이지.
+    브라우저에서 https://[Render주소]/escalation-logs?key=[ADMIN_KEY] 로 접속하면 돼요.
+    ADMIN_KEY는 Render 환경변수에서 직접 설정해주세요(안 정하면 기본값 'changeme' 사용,
+    보안을 위해 꼭 바꿔서 쓰는 걸 추천해요)."""
+    if key != ADMIN_KEY:
+        return {"error": "접근 권한이 없어요. 올바른 key 파라미터가 필요해요."}
+
+    if not escalation_logs:
+        return {"count": 0, "message": "아직 상담원 연결로 넘어간 질문이 없어요."}
+
+    # 최신 순으로 정렬해서 보여줌
+    ordered = list(reversed(escalation_logs))
+    return {
+        "count": len(ordered),
+        "logs": ordered,
+    }
 
 
 if __name__ == "__main__":
