@@ -158,6 +158,24 @@ async def chat(request: Request):
                             "text": final_text
                         }
                     }
+                ],
+                # 하단 고정 퀵답변 버튼 3개 설정
+                "quickReplies": [
+                    {
+                        "label": "온라인개통 방법",
+                        "action": "webLink",
+                        "webLinkUrl": "https://m.site.naver.com/222oX"
+                    },
+                    {
+                        "label": "유심구입처 안내",
+                        "action": "message",
+                        "messageText": "유심 어디서 사야 돼?"
+                    },
+                    {
+                        "label": "채널추가",
+                        "action": "webLink",
+                        "webLinkUrl": "http://pf.kakao.com/_XAmaxb/friend"
+                    }
                 ]
             }
         }
@@ -170,6 +188,23 @@ async def chat(request: Request):
                         "simpleText": {
                             "text": "안녕하세요! 앤텔레콤 오늘통신입니다. 😊\n죄송합니다, 잠시 후 다시 시도해 주시거나 카카오톡 채널로 문의해 주세요."
                         }
+                    }
+                ],
+                "quickReplies": [
+                    {
+                        "label": "온라인개통 방법",
+                        "action": "webLink",
+                        "webLinkUrl": "https://m.site.naver.com/222oX"
+                    },
+                    {
+                        "label": "유심구입처 안내",
+                        "action": "message",
+                        "messageText": "유심 어디서 사야 돼?"
+                    },
+                    {
+                        "label": "채널추가",
+                        "action": "webLink",
+                        "webLinkUrl": "http://pf.kakao.com/_XAmaxb/friend"
                     }
                 ]
             }
