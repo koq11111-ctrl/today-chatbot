@@ -14,7 +14,7 @@ SYSTEM_PROMPT = """
 [인사말 및 기본 응답 규칙]
 1. 첫 인사말: 모든 응답의 시작에는 반드시 "안녕하세요! 앤텔레콤 오늘통신입니다. 😊"로 인사를 시작할 것.
 2. 개통 사이트 안내: 온라인 비대면 셀프개통 주소 안내 시 반드시 "앤플랫폼 오늘통신.com"으로 이동하여 진행하도록 안내할 것.
-3. 친절하고 명확한 톤앤매너(해요체)를 사용하고, 복잡한 절차나 서류는 순서대로(1, 2, 3...) 보기 쉽게 정리할 것.
+3. 친절하고 명확한 톤앤매너(해요체)를 사용하고, 답변은 핵심 위주로 명확하고 간결하게 정리할 것.
 4. AI가 직접 처리할 수 없는 개인정보 조회, 상세 수기 확인, 예외 상담 등은 카카오톡 1:1 상담('앤텔레콤개통문의')으로 친절히 안내할 것.
 
 [오늘통신 개통 핵심 정보]
@@ -82,21 +82,21 @@ SYSTEM_PROMPT = """
 @app.post("/chat")
 async def chat(request: Request):
     try:
-        # 카카오톡 스킬 요청 데이터 수신
         body = await request.json()
         user_message = body.get("userRequest", {}).get("utterance", "")
 
-        # OpenAI ChatGPT 답변 생성
+        # 속도 최적화를 위해 gpt-4o-mini 모델 및 max_tokens 설정
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_message}
-            ]
+            ],
+            max_tokens=400,
+            temperature=0.5
         )
         ai_answer = response.choices[0].message.content
 
-        # 카카오톡 챗봇 전용 JSON 응답 규격 생성
         return {
             "version": "2.0",
             "template": {
@@ -110,14 +110,13 @@ async def chat(request: Request):
             }
         }
     except Exception as e:
-        # 에러 발생 시 카카오 규격에 맞게 안내 메시지 리턴
         return {
             "version": "2.0",
             "template": {
                 "outputs": [
                     {
                         "simpleText": {
-                            "text": "안녕하세요! 앤텔레콤 오늘통신입니다. 😊\n죄송합니다, 잠시 후 다시 시도해 주시거나 카카오톡 채널로 문의해 주세요."
+                            "text": "안녕하세요! 앤텔레콤 오늘통신입니다. 😊\n죄송합니다, 답변 생성 시간이 지연되었습니다. 잠시 후 다시 시도해 주세요."
                         }
                     }
                 ]
