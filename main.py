@@ -177,6 +177,9 @@ SYSTEM_PROMPT_SHORT = PERSONA + """
 중요: 상담원 연결을 안내할 때는, 답변 맨 마지막 줄에 반드시 정확히 "[ESCALATION]"
 텍스트를 추가해(줄바꿈 후). 이 마커는 나중에 사장님이 자주 나오는 질문을 확인하는
 용도로 쓰이고, 고객에게는 자동으로 안 보이게 처리돼. 일반 답변에는 절대 붙이지 말 것.
+단, 고객이 "상담원 연결해주세요"처럼 명시적으로 사람 상담을 요청하면 자가해결 유도
+없이 바로 연결 안내를 하고 마커를 붙일 것(근무시간 09:40~21:00 밖이면 내일 오전부터
+순서대로 연락드린다고 사실대로 안내).
 
 [핵심 정보]
 - ★★★취급 통신망은 K망(KT), L망(LG U+) 딱 2가지뿐★★★. SKT망 개통은 전혀
@@ -894,6 +897,10 @@ PASS·삼성패스·신한·페이코 중 간편인증서 인증, 이 두 가지
 가이드나 다른 지식베이스 섹션에 관련 정보가 있으면, 반드시 그 내용으로 구체적인
 해결 단계를 먼저 제시해. 고객이 "그래도 안 돼요/이미 해봤어요"라고 재확인해줄 때만
 상담원 연결을 안내해.
+■ 예외: 고객이 "상담원 연결해주세요"처럼 명시적으로 사람 상담을 요청하면(버튼을
+눌러서 온 경우 포함) 자가해결 유도 없이 바로 연결 안내를 하고 [ESCALATION] 마커를
+붙일 것. 근무시간(매일 09:40~21:00) 밖이면 "지금은 담당자 근무시간이 아니라서 내일
+오전부터 순서대로 연락드릴 거예요"라고 사실대로 안내.
 
 ■ 상담원 연결이 "즉시" 필요한 경우 (이런 경우에만 바로 안내):
 1. 특정 매장의 실시간 재고, 예약 현황 등 지식베이스에 아예 없는 판매점 관련 사실 정보
@@ -964,9 +971,23 @@ def get_ai_answer(user_message: str, system_prompt: str, history: list = None) -
         )
 
 
-def build_simple_text_response(text: str) -> dict:
+# =========================================================
+# 바로가기 버튼(퀵리플라이) — 채팅 입력창 위에 뜨는 버튼 칩.
+# 첫 대화이거나 10분 이상 조용하다가 다시 온 고객에게만 붙여서,
+# "여기 누르면 바로 물어볼 수 있구나"를 한눈에 보여줘요.
+# (이어지는 대화에는 안 붙여서 사람과 대화하는 느낌을 유지)
+# =========================================================
+QUICK_REPLIES = [
+    {"label": "📱 개통 문의", "action": "message", "messageText": "개통하고 싶어요"},
+    {"label": "💰 요금제 안내", "action": "message", "messageText": "요금제 알려주세요"},
+    {"label": "📶 유심 구매 방법", "action": "message", "messageText": "유심은 어디서 사나요?"},
+    {"label": "🙋 상담원 연결", "action": "message", "messageText": "상담원 연결해주세요"},
+]
+
+
+def build_simple_text_response(text: str, with_quick_replies: bool = False) -> dict:
     """카카오 오픈빌더 규격에 맞춘 일반 텍스트 응답 JSON"""
-    return {
+    payload = {
         "version": "2.0",
         "template": {
             "outputs": [
@@ -978,6 +999,9 @@ def build_simple_text_response(text: str) -> dict:
             ]
         }
     }
+    if with_quick_replies:
+        payload["template"]["quickReplies"] = QUICK_REPLIES
+    return payload
 
 
 def record_turn(user_id: str, history: list, user_message: str, ai_answer: str):
@@ -991,14 +1015,15 @@ def record_turn(user_id: str, history: list, user_message: str, ai_answer: str):
     save_history(user_id, new_history)
 
 
-async def process_and_send_callback(user_message: str, callback_url: str, user_id: str, history: list):
+async def process_and_send_callback(user_message: str, callback_url: str, user_id: str, history: list,
+                                    with_quick_replies: bool = False):
     """(콜백이 켜진 블록에서만 사용됨) 백그라운드에서 OpenAI 호출 후, 완성된 답변을
     콜백 URL로 다시 전송하는 함수. 콜백 URL은 발급 후 1분간만 유효하고 1회만 쓸 수 있음.
     콜백 경로는 시간 여유가 있어서(최대 1분) 상세판 프롬프트를 사용해요."""
     ai_answer = get_ai_answer(user_message, SYSTEM_PROMPT_FULL, history)
     ai_answer = check_and_strip_escalation(user_message, ai_answer, user_id)
     record_turn(user_id, history, user_message, ai_answer)
-    payload = build_simple_text_response(ai_answer)
+    payload = build_simple_text_response(ai_answer, with_quick_replies=with_quick_replies)
     try:
         async with httpx.AsyncClient(timeout=30) as http_client:
             await http_client.post(callback_url, json=payload)
@@ -1029,10 +1054,12 @@ async def kakao_chat(request: Request, background_tasks: BackgroundTasks):
     # 없이 바로 답변만 나가고, 오래 걸릴 때만 어쩔 수 없이 콜백(=대기 문구)으로
     # 전환돼요.
     # ---------------------------------------------------------------
+    # 첫 대화(또는 10분 이상 공백 후 재대화)인지 — 대기 문구와 바로가기 버튼의 기준
+    fresh_conversation = (last_seen_gap is None) or (last_seen_gap > WAIT_MESSAGE_GAP_SECONDS)
+
     if callback_url:
-        show_wait = (last_seen_gap is None) or (last_seen_gap > WAIT_MESSAGE_GAP_SECONDS)
-        if show_wait:
-            background_tasks.add_task(process_and_send_callback, user_message, callback_url, user_id, history)
+        if fresh_conversation:
+            background_tasks.add_task(process_and_send_callback, user_message, callback_url, user_id, history, True)
             return {"version": "2.0", "useCallback": True}
 
         # ---- 이어지는 대화: 대기 문구 없이 즉시 응답 시도 (상세판 프롬프트 사용) ----
@@ -1063,7 +1090,7 @@ async def kakao_chat(request: Request, background_tasks: BackgroundTasks):
     ai_answer = get_ai_answer(user_message, SYSTEM_PROMPT_SHORT, history)
     ai_answer = check_and_strip_escalation(user_message, ai_answer, user_id)
     record_turn(user_id, history, user_message, ai_answer)
-    return build_simple_text_response(ai_answer)
+    return build_simple_text_response(ai_answer, with_quick_replies=fresh_conversation)
 
 
 @app.get("/escalation-logs")
