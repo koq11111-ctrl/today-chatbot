@@ -13,9 +13,35 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY_HERE"))
 
 @app.get("/")
 async def health_check():
-    """UptimeRobot 등 상태 확인용 헬스체크 주소. 여기가 없으면 루트(/)
-    주소를 핑(ping)했을 때 404가 떠서 UptimeRobot이 계속 '다운'으로 표시함."""
+    """상태 확인용 헬스체크 주소."""
     return {"status": "ok", "service": "today-chatbot"}
+
+
+# =========================================================
+# 셀프 핑(keep-alive) — Render 무료 플랜은 15분간 외부 요청이 없으면 서버를
+# 재웁니다(잠들면 첫 손님 응답에 50초+ 걸려 카카오 5초 제한에 타임아웃).
+# 외부 핑 서비스(UptimeRobot 등)는 Render가 봇 User-Agent를 503으로 차단해서
+# 소용이 없고, GitHub Actions 예약 실행은 무료 플랜에서 몇 시간씩 지연됩니다.
+# 그래서 서버 스스로 10분마다 자기 공개 주소를 호출해 "외부 트래픽"을 만들어
+# 잠들지 않게 합니다. (서버가 재시작돼도 시작 시점에 이 루프가 다시 켜져요)
+# =========================================================
+KEEPALIVE_URL = os.getenv("KEEPALIVE_URL", "https://today-chatbot.onrender.com/")
+KEEPALIVE_INTERVAL_SECONDS = 60 * 10  # 10분 (Render 슬립 기준 15분보다 짧게)
+
+
+async def _keepalive_loop():
+    while True:
+        await asyncio.sleep(KEEPALIVE_INTERVAL_SECONDS)
+        try:
+            async with httpx.AsyncClient(timeout=30) as c:
+                await c.get(KEEPALIVE_URL, headers={"User-Agent": "today-chatbot-selfping"})
+        except Exception as e:
+            print(f"[셀프 핑 실패] {e}")
+
+
+@app.on_event("startup")
+async def start_keepalive():
+    asyncio.create_task(_keepalive_loop())
 
 # =========================================================
 # 대화 기록(세션) 저장소 — "꼬리물기 상담"을 위해 필요해요.
